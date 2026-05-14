@@ -2,7 +2,7 @@ import { unlinkSync } from "node:fs";
 import { createServer } from 'node:http';
 import mccRiskData from "./files/mcc_risk.json" with { type: "json" };
 import normalizationData from "./files/normalization.json" with { type: "json" };
-import type { FraudScoreResponse, TransactionPayload } from "./types.ts";
+import type { TransactionPayload } from "./types.ts";
 import { knnFraudScore, queryVector, referenceCount } from "./vector.ts";
 
 const N = normalizationData;
@@ -15,8 +15,9 @@ const clamp = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
 // Escreve o vetor de consulta diretamente no Float32Array pré-alocado — zero alocações.
 function vectorizeToBuffer(q: Float32Array, p: TransactionPayload): void {
   const requestedAtMs = Date.parse(p.transaction.requested_at);
-  const date = new Date(requestedAtMs);
   const avgAmount = p.customer.avg_amount > 0 ? p.customer.avg_amount : 1;
+  const utcHour = Math.floor((requestedAtMs % 86_400_000) / 3_600_000);
+  const jsDay = (Math.floor(requestedAtMs / 86_400_000) + 4) % 7;
 
   let minutesSinceLast = -1;
   let kmFromLast = -1;
@@ -28,8 +29,6 @@ function vectorizeToBuffer(q: Float32Array, p: TransactionPayload): void {
     );
     kmFromLast = clamp(p.last_transaction.km_from_current / N.max_km);
   }
-
-  const jsDay = date.getUTCDay();
 
   // Verificar se merchant é desconhecido: loop simples é mais rápido que new Set() para listas curtas
   let unknownMerchant = 1;
@@ -44,7 +43,7 @@ function vectorizeToBuffer(q: Float32Array, p: TransactionPayload): void {
   q[0] = clamp(p.transaction.amount / N.max_amount);
   q[1] = clamp(p.transaction.installments / N.max_installments);
   q[2] = clamp(p.transaction.amount / avgAmount / N.amount_vs_avg_ratio);
-  q[3] = date.getUTCHours() / 23;
+  q[3] = utcHour / 23;
   q[4] = (jsDay === 0 ? 6 : jsDay - 1) / 6;
   q[5] = minutesSinceLast;
   q[6] = kmFromLast;
@@ -60,28 +59,8 @@ function vectorizeToBuffer(q: Float32Array, p: TransactionPayload): void {
 const isReady = referenceCount > 0;
 console.log(`✅ VP-Tree pronto — ${referenceCount} vetores de referência.`);
 
-const REPORT_EVERY = 500;
-let reqCount = 0;
-let tParse = 0,
-  tVectorize = 0,
-  tKnn = 0,
-  tTotal = 0;
 
-function reportAndReset() {
-  const n = reqCount;
-  console.log(
-    `[perf ${n}req] parse=${(tParse / n).toFixed(3)}ms  vectorize=${(
-      tVectorize / n
-    ).toFixed(3)}ms  knn=${(tKnn / n).toFixed(3)}ms  total=${(
-      tTotal / n
-    ).toFixed(3)}ms`,
-  );
-  reqCount = 0;
-  tParse = 0;
-  tVectorize = 0;
-  tKnn = 0;
-  tTotal = 0;
-}
+const JSON_HEADERS = { 'Content-Type': 'application/json' };
 
 const socketPath = process.env.SOCKET_PATH!;
 
@@ -91,38 +70,19 @@ try {
 } catch {}
 
 const server = createServer((req, res) => {
-  const { url } = req;
+  const { url, method } = req;
 
-  if (url === '/fraud-score') {
+  if (url === '/fraud-score' && method === 'POST') {
     const chunks: Buffer[] = [];
     req.on('data', (chunk: Buffer) => chunks.push(chunk));
     req.on('end', () => {
-      try {
-        const t0 = performance.now();
-        const body = JSON.parse(Buffer.concat(chunks).toString()) as TransactionPayload;
-        const t1 = performance.now();
-        vectorizeToBuffer(queryVector, body);
-        const t2 = performance.now();
-        const fraudScore = knnFraudScore();
-        const t3 = performance.now();
-
-        tParse += t1 - t0;
-        tVectorize += t2 - t1;
-        tKnn += t3 - t2;
-        tTotal += t3 - t0;
-        if (++reqCount >= REPORT_EVERY) reportAndReset();
-
-        const result = JSON.stringify({
-          approved: fraudScore < APPROVAL_THRESHOLD,
-          fraud_score: fraudScore,
-        } satisfies FraudScoreResponse);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(result);
-      } catch (e) {
-        console.error(e);
-        res.writeHead(400);
-        res.end('Invalid Request');
-      }
+      const raw = chunks.length === 1 ? chunks[0]! : Buffer.concat(chunks);
+      const body = JSON.parse(raw.toString()) as TransactionPayload;
+      vectorizeToBuffer(queryVector, body);
+      const fraudScore = knnFraudScore();
+      const result = `{"approved":${fraudScore < APPROVAL_THRESHOLD},"fraud_score":${fraudScore}}`;
+      res.writeHead(200, JSON_HEADERS);
+      res.end(result);
     });
     return;
   }
