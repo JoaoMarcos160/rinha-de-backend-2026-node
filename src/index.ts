@@ -60,6 +60,29 @@ function vectorizeToBuffer(q: Float32Array, p: TransactionPayload): void {
 const isReady = referenceCount > 0;
 console.log(`✅ VP-Tree pronto — ${referenceCount} vetores de referência.`);
 
+const REPORT_EVERY = 500;
+let reqCount = 0;
+let tParse = 0,
+  tVectorize = 0,
+  tKnn = 0,
+  tTotal = 0;
+
+function reportAndReset() {
+  const n = reqCount;
+  console.log(
+    `[perf ${n}req] parse=${(tParse / n).toFixed(3)}ms  vectorize=${(
+      tVectorize / n
+    ).toFixed(3)}ms  knn=${(tKnn / n).toFixed(3)}ms  total=${(
+      tTotal / n
+    ).toFixed(3)}ms`,
+  );
+  reqCount = 0;
+  tParse = 0;
+  tVectorize = 0;
+  tKnn = 0;
+  tTotal = 0;
+}
+
 const socketPath = process.env.SOCKET_PATH!;
 
 process.umask(0o000);
@@ -75,9 +98,20 @@ const server = createServer((req, res) => {
     req.on('data', (chunk: Buffer) => chunks.push(chunk));
     req.on('end', () => {
       try {
+        const t0 = performance.now();
         const body = JSON.parse(Buffer.concat(chunks).toString()) as TransactionPayload;
+        const t1 = performance.now();
         vectorizeToBuffer(queryVector, body);
+        const t2 = performance.now();
         const fraudScore = knnFraudScore();
+        const t3 = performance.now();
+
+        tParse += t1 - t0;
+        tVectorize += t2 - t1;
+        tKnn += t3 - t2;
+        tTotal += t3 - t0;
+        if (++reqCount >= REPORT_EVERY) reportAndReset();
+
         const result = JSON.stringify({
           approved: fraudScore < APPROVAL_THRESHOLD,
           fraud_score: fraudScore,
