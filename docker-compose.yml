@@ -7,7 +7,7 @@ services:
   lb:
     image: haproxy:lts-alpine
     cpus: "0.2"
-    mem_limit: "40m"
+    mem_limit: "30m"
 
     ports:
       - "9999:9999"
@@ -32,7 +32,7 @@ services:
     hostname: api1
 
     cpus: "0.4"
-    mem_limit: "155m"
+    mem_limit: "160m"
 
     environment:
       SOCKET_PATH: /sockets/api1.sock
@@ -51,7 +51,7 @@ services:
     hostname: api2
 
     cpus: "0.4"
-    mem_limit: "155m"
+    mem_limit: "160m"
 
     environment:
       SOCKET_PATH: /sockets/api2.sock
